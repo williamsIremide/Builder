@@ -31,6 +31,9 @@ export const NavbarBlock = () => {
         outline: selected ? '2px solid #f59e0b' : 'none',
         cursor: 'grab',
         width: '100%',
+        maxWidth: '100%',
+        overflow: 'visible',
+        boxSizing: 'border-box',
         position: 'sticky',
         top: 0,
         zIndex: 50,
@@ -39,8 +42,8 @@ export const NavbarBlock = () => {
         minHeight: '64px',
         display: 'flex',
         alignItems: 'center',
-        padding: '0 64px',
-        gap: '24px',
+        padding:  '0 20px',
+        gap: '12px'
       }}
     >
       {/* Logo */}
@@ -53,7 +56,7 @@ export const NavbarBlock = () => {
       </div>
 
       {/* Nav — Products dropdown + links */}
-      <nav style={{ display: 'flex', alignItems: 'center', gap: '4px', position: 'relative' }}>
+      <nav style={{ display: 'flex', alignItems: 'center', gap: '4px', position: 'relative', flexShrink: 1, minWidth: 0 }}>
 
         {/* Products dropdown */}
         <div style={{ position: 'relative' }}>
@@ -146,7 +149,7 @@ export const NavbarBlock = () => {
       <div style={{ flex: 1 }} />
 
       {/* SearchBar — Location dropdown + input + Search button */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0', flexShrink: 1, minWidth: 0 }}>
         {/* Location dropdown button */}
         <button
           style={{

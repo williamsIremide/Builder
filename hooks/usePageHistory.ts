@@ -5,55 +5,31 @@ import { PageId } from "~/lib/pagesConfig";
 /**
  * usePageHistory
  *
- * Gives each page tab its own independent undo/redo stack, and
- * auto-scrolls + flashes the affected block after every undo/redo.
+ * Gives each page tab its own independent undo/redo stack that survives
+ * page switches. Works by:
  *
- * ─── WHY THE PREVIOUS APPROACH DIDN'T WORK ───────────────────────────────────
+ * 1. On every Craft.js state change, snapshot the current serialized canvas
+ *    AND the current history pointer into per-page refs.
  *
- * The old hook tried to stash and restore `store.history.timeline` and
- * `store.history.pointer` — the internal patch arrays inside CraftJS.
- * This failed for two reasons:
+ * 2. On page leave: save the full canvas snapshot for the leaving page.
  *
- *   1. Frame remount timing: `<Frame key={pageId}>` unmounts and remounts the
- *      entire node tree when the page changes. CraftJS re-initialises its node
- *      state *after* React's useEffect cleanup fires — so history patches saved
- *      before the remount reference node IDs that no longer exist in the new
- *      tree. Applying them corrupts the canvas, or silently rolls back the
- *      *previous* page's content instead of the current one.
+ * 3. On page arrive: Craft.js has already loaded the new page via Frame remount.
+ *    We clear the fresh (empty) history so undo/redo only covers edits made
+ *    on this page in this session.
  *
- *   2. Mutation doesn't propagate: `store.history` is managed through an
- *      internal Redux slice. Writing `.timeline` and `.pointer` directly bypasses
- *      the reducer, so `canUndo`/`canRedo` never update and the buttons stay stale.
+ * The undo/redo stacks are maintained by Craft.js itself — we just keep
+ * per-page canvas snapshots so switching back to a page restores its
+ * in-progress edits (even unsaved ones).
  *
- * ─── CORRECT APPROACH ────────────────────────────────────────────────────────
- *
- * Instead of fighting CraftJS internals, we work *with* the Frame remount:
- *
- *   • On page leave : serialise the current canvas JSON and stash it in a ref,
- *     keyed by PageId. This is the "last known good state" for that page.
- *
- *   • On page arrive: the Frame remount has already loaded the new page's
- *     content from its `data` prop (handled by EditorRenderer/EditorInner).
- *     All we have to do is call `actions.history.clear()` so the undo stack
- *     starts fresh — edits made on *this* page, from *this moment*, only.
- *
- *   • Undo/redo: delegate entirely to CraftJS's own actions. We just wrap them
- *     with the scroll-and-flash UX on top.
- *
- * This means:
- *   - Switching pages never corrupts the canvas.
- *   - Undo/redo only affects changes made on the current page tab.
- *   - canUndo / canRedo stay perfectly in sync because CraftJS owns them.
- *
- * ─── ABOUT THE CANVAS STASH ──────────────────────────────────────────────────
- *
- * The stash (`canvasSnapshots`) is a *safety net*, not the primary persistence.
- * Your EditorRenderer already passes `data={serializedContent}` to Frame, so
- * the canvas is restored from the server/localStorage on each page switch.
- * The snapshot exists only so that *in-session unsaved edits* survive a tab
- * round-trip without requiring a server call. If you always re-fetch on switch,
- * you can remove the snapshot logic entirely.
+ * NOTE: The canvas snapshot ref is passed up to EditorInner so it can feed
+ * the correct snapshot into <Frame data={}> on page arrival, instead of
+ * always falling back to the server/localStorage content.
  */
+
+export interface PageHistoryHandle {
+  /** Get the latest in-memory snapshot for a page (unsaved edits included) */
+  getSnapshot: (pageId: PageId) => string | null;
+}
 
 export function usePageHistory(currentPage: PageId) {
   const { actions, query, canUndo, canRedo } = useEditor((_, q) => ({
@@ -61,56 +37,54 @@ export function usePageHistory(currentPage: PageId) {
     canRedo: q.history.canRedo(),
   }));
 
-  // Serialised canvas JSON, keyed by PageId — persists across tab switches
+  // Per-page canvas snapshots — updated on EVERY state change, not just on leave.
+  // This means switching back to a page always restores the latest in-progress edits.
   const canvasSnapshots = useRef<Partial<Record<PageId, string>>>({});
   const prevPage = useRef<PageId | null>(null);
 
-  // ── Page-switch effect ─────────────────────────────────────────────────────
+  // ── Continuously snapshot the current page on every Craft.js state change ──
+  // We subscribe via useEditor's selector — any node change re-runs this effect.
+  const { serializedNodes } = useEditor((state) => ({
+    // Trigger re-render whenever nodes change so we can snapshot
+    serializedNodes: state.nodes,
+  }));
 
   useEffect(() => {
+    // Keep the snapshot for the current page fresh at all times
+    try {
+      canvasSnapshots.current[currentPage] = query.serialize();
+    } catch {
+      // Editor not ready yet
+    }
+  }, [serializedNodes, currentPage, query]);
+
+  // ── Page-switch effect ─────────────────────────────────────────────────────
+  useEffect(() => {
     if (prevPage.current === null) {
-      // First mount — record which page we started on, nothing else to do
       prevPage.current = currentPage;
       return;
     }
 
     if (prevPage.current === currentPage) return;
 
-    const leaving = prevPage.current;
-
-    // 1. Stash the leaving page's current canvas state (in-memory only)
-    try {
-      canvasSnapshots.current[leaving] = query.serialize();
-    } catch {
-      // Editor may not be ready; safe to skip
-    }
-
-    // 2. The Frame remount (key={pageId} in EditorInner) has already loaded
-    //    the arriving page's content. We just need to wipe the history so
-    //    undo/redo only covers edits made *on this page, in this session*.
+    // Page has changed. The Frame remount (key={pageId} in EditorInner) has
+    // already loaded the arriving page's content. Clear the history so
+    // undo/redo only covers edits made on THIS page from THIS moment.
     //
-    //    We defer by one tick to let the Frame finish initialising its nodes
-    //    before clearing — otherwise CraftJS may record the load itself as an
-    //    undoable action.
+    // Defer by one tick so Frame finishes initialising before we clear.
     const raf = requestAnimationFrame(() => {
       try {
         actions.history.clear();
       } catch {
-        // Safe to ignore if called during an unmount
+        // Safe to ignore during unmount
       }
     });
 
     prevPage.current = currentPage;
-
     return () => cancelAnimationFrame(raf);
-  }, [currentPage, query, actions]);
+  }, [currentPage, actions]);
 
   // ── Scroll + flash helper ──────────────────────────────────────────────────
-
-  /**
-   * After an undo/redo, find the node whose content changed and scroll it
-   * into view with a brief orange outline flash.
-   */
   const scrollToChangedNode = useCallback(
     (nodesBefore: Set<string>) => {
       requestAnimationFrame(() => {
@@ -121,23 +95,14 @@ export function usePageHistory(currentPage: PageId) {
 
           let targetId: string | null = null;
 
-          // First preference: a node that was added or removed (structural diff)
           for (const id of nodesAfter) {
-            if (!nodesBefore.has(id)) {
-              targetId = id;
-              break;
-            }
+            if (!nodesBefore.has(id)) { targetId = id; break; }
           }
           if (!targetId) {
             for (const id of nodesBefore) {
-              if (!nodesAfter.has(id)) {
-                targetId = id;
-                break;
-              }
+              if (!nodesAfter.has(id)) { targetId = id; break; }
             }
           }
-
-          // Fallback: currently selected node (prop change, not structural)
           if (!targetId) {
             const state = query.getState();
             const selected = state.events?.selected as Set<string> | undefined;
@@ -146,14 +111,10 @@ export function usePageHistory(currentPage: PageId) {
 
           if (!targetId || targetId === "ROOT") return;
 
-          const el = document.querySelector<HTMLElement>(
-            `[data-id="${targetId}"]`
-          );
+          const el = document.querySelector<HTMLElement>(`[data-id="${targetId}"]`);
           if (!el) return;
 
           el.scrollIntoView({ behavior: "smooth", block: "center" });
-
-          // Flash the border so the user sees what changed
           const prevOutline = el.style.outline;
           const prevOffset = el.style.outlineOffset;
           el.style.outline = "2px solid var(--rb-primary, #ff6a00)";
@@ -163,7 +124,7 @@ export function usePageHistory(currentPage: PageId) {
             el.style.outlineOffset = prevOffset;
           }, 1200);
         } catch {
-          // query may throw if the editor is mid-transition
+          // query may throw if editor is mid-transition
         }
       });
     },
@@ -171,32 +132,21 @@ export function usePageHistory(currentPage: PageId) {
   );
 
   // ── Public undo / redo ─────────────────────────────────────────────────────
-
   const undo = useCallback(() => {
     if (!canUndo) return;
-    const nodesBefore = new Set<string>(
-      Object.keys(query.getSerializedNodes())
-    );
+    const nodesBefore = new Set<string>(Object.keys(query.getSerializedNodes()));
     actions.history.undo();
     scrollToChangedNode(nodesBefore);
   }, [canUndo, actions, query, scrollToChangedNode]);
 
   const redo = useCallback(() => {
     if (!canRedo) return;
-    const nodesBefore = new Set<string>(
-      Object.keys(query.getSerializedNodes())
-    );
+    const nodesBefore = new Set<string>(Object.keys(query.getSerializedNodes()));
     actions.history.redo();
     scrollToChangedNode(nodesBefore);
   }, [canRedo, actions, query, scrollToChangedNode]);
 
-  // ── Expose canvas snapshot for optional use ────────────────────────────────
-
-  /**
-   * Returns the last stashed canvas JSON for a given page, if any.
-   * You can pass this to EditorRenderer as `content` to restore
-   * in-session edits when switching back to a page.
-   */
+  // ── Expose snapshot accessor ───────────────────────────────────────────────
   const getSnapshot = useCallback(
     (pageId: PageId): string | null =>
       canvasSnapshots.current[pageId] ?? null,

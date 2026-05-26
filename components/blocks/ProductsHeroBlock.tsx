@@ -17,6 +17,8 @@ export interface ProductsHeroBlockProps {
   activePillText?: string;
   /** Whether to show the inline Filters button + panel in the storefront */
   showFiltersButton?: boolean;
+  /** Whether to show the category pill strip */
+  showCategoryPills?: boolean;
 }
 
 // ─── Settings panel ───────────────────────────────────────────────────────────
@@ -95,6 +97,24 @@ export const ProductsHeroBlockSettings = () => {
         </div>
         <p style={{ fontSize: '0.68rem', color: '#52525b', margin: '4px 0 0', lineHeight: 1.5 }}>
           When enabled, a "Filters" button appears in the pill strip. Shoppers click it to expand quick-filter options (category, size, price).
+        </p>
+      </div>
+
+      {/* ── Category pills toggle ── */}
+      <div style={{ borderTop: '1px solid #27272a', margin: '12px 0 8px', paddingTop: '12px' }}>
+        <p style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#52525b', margin: '0 0 8px' }}>
+          Category Pills
+        </p>
+        <div className="settings-group settings-toggle">
+          <label>Show Category Pills</label>
+          <input
+            type="checkbox"
+            checked={props.showCategoryPills ?? true}
+            onChange={(e) => setProp((p: ProductsHeroBlockProps) => { p.showCategoryPills = e.target.checked; })}
+          />
+        </div>
+        <p style={{ fontSize: '0.68rem', color: '#52525b', margin: '4px 0 0', lineHeight: 1.5 }}>
+          When disabled, the category pill strip (including the Filters button) is hidden entirely.
         </p>
       </div>
 
@@ -262,6 +282,7 @@ export const ProductsHeroBlock = ({
   activePillBg = '#111827',
   activePillText = '#ffffff',
   showFiltersButton = true,
+  showCategoryPills = true,
 }: ProductsHeroBlockProps) => {
   const { connectors: { connect, drag }, selected } = useNode((state) => ({
     selected: state.events.selected,
@@ -336,7 +357,7 @@ export const ProductsHeroBlock = ({
       </div>
 
       {/* ── Pill strip row: categories + optional Filters button ── */}
-      <div style={{
+      {showCategoryPills && <div style={{
         width: '100%', maxWidth: '1536px', margin: '0 auto',
         padding: '16px 32px 24px',
         display: 'flex', alignItems: 'center', gap: '8px',
@@ -420,10 +441,10 @@ export const ProductsHeroBlock = ({
             )}
           </button>
         )}
-      </div>
+      </div>}
 
       {/* ── Inline filter panel (shown when Filters button is clicked) ── */}
-      {showFiltersButton && filterPanelOpen && (
+      {showCategoryPills && showFiltersButton && filterPanelOpen && (
         <InlineFilterPanel
           activeCategoryId={activeCategoryId}
           onCategoryChange={handleCategorySelect}
@@ -437,7 +458,7 @@ export const ProductsHeroBlock = ({
       )}
 
       {/* ── Active filter indicator (when panel closed but filters active) ── */}
-      {activeCategoryId !== null && !filterPanelOpen && (
+      {showCategoryPills && activeCategoryId !== null && !filterPanelOpen && (
         <div style={{
           width: '100%', maxWidth: '1536px', margin: '0 auto',
           padding: '0 32px 8px',
@@ -470,6 +491,7 @@ ProductsHeroBlock.craft = {
     activePillBg: '#111827',
     activePillText: '#ffffff',
     showFiltersButton: true,
+    showCategoryPills: true,
   },
   related: { settings: ProductsHeroBlockSettings },
 };

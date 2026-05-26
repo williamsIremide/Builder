@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import {
@@ -14,13 +14,7 @@ import {
   handlePublishPage,
   handleSaveDraft,
 } from "~/components";
-import { fetchSingleInstance } from "~/utils/requestHandler/fetchData";
-import {
-  storefrontEndpoints,
-  storefrontPageEndpoints,
-} from "~/constants/routes";
-import { request } from "~/utils/requestHandler/baseRequest";
-import { savePageData, loadPageData } from "~/lib/storage"; // ← ADD THIS IMPORT
+import { savePageData, loadPageData } from "~/lib/storage";
 
 interface EditorPageProps {
   pageId: PageId;
@@ -38,114 +32,53 @@ interface PageData {
 export default function EditorPage({ pageId, storefrontId }: EditorPageProps) {
   const router = useRouter();
 
-  const [page, setPage] = useState<PageData | null>(null);
-  const [pageLoading, setPageLoading] = useState(false);
-  const [pageError, setPageError] = useState<string | null>(null);
+  // Load each page's initial content ONCE from sessionStorage.
+  // After that, Craft.js owns the canvas state — we never re-read storage.
+  // useRef so it doesn't trigger re-renders and doesn't reset on page switch.
+  const initialContentRef = useRef<Partial<Record<PageId, CraftJson | null>>>({});
 
-  const [theme, setTheme] = useState<StorefrontTheme>(DEFAULT_THEME);
-  const [themeLoading, setThemeLoading] = useState(false);
-  const [themeError, setThemeError] = useState<string | null>(null);
+  const getInitialContent = (pid: PageId): CraftJson | null => {
+    if (!(pid in initialContentRef.current)) {
+      const raw = loadPageData(pid);
+      initialContentRef.current[pid] = raw ? (JSON.parse(raw) as CraftJson) : null;
+    }
+    return initialContentRef.current[pid] ?? null;
+  };
 
-  const [saveLoading, setSaveLoading] = useState(false);
-  const [publishState, setPublishState] = useState<
-    "idle" | "publishing" | "done"
-  >("idle");
-
-  // // Fetch page data and theme in parallel on mount / page switch
-  // useEffect(() => {
-  //   setPageLoading(true);
-
-  //   Promise.all([
-  //     request<StorefrontPage[]>(
-  //       `${storefrontPageEndpoints.list.backendURL}?storefront=${storefrontId}&page_id=${pageId}`,
-  //       { method: "GET" },
-  //       setPageError,
-  //       router,
-  //     ),
-  //     request<StorefrontTheme>(
-  //       `${storefrontEndpoints.retrieve.backendURL(storefrontId)}theme/`,
-  //       { method: "GET" },
-  //       setThemeError,
-  //       router,
-  //     ),
-  //   ])
-  //     .then(([pageData, themeData]) => {
-  //       const pages = pageData as StorefrontPage[] | null;
-  //       setPage(pages?.[0] ?? null);
-  //       setTheme((themeData as StorefrontTheme) ?? DEFAULT_THEME);
-  //     })
-  //     .finally(() => setPageLoading(false));
-  // }, [storefrontId, pageId]);
+  const [theme] = useState<StorefrontTheme>(DEFAULT_THEME);
+  const [publishState, setPublishState] = useState<"idle" | "publishing" | "done">("idle");
+  const [page] = useState<PageData | null>(null);
 
   const handleSave = useCallback(
     async (content: CraftJson) => {
-      // TEMPORARY: save to localStorage until backend is connected
+      // TEMPORARY: save to sessionStorage (clears on server restart / tab close)
+      // LATER: replace with handleSaveDraft(content, storefrontId, pageId, router, setPageError, setSaveLoading)
       savePageData(pageId, JSON.stringify(content));
-      // LATER: remove the line above and uncomment the line below
-      // await handleSaveDraft(content, storefrontId, pageId, router, setPageError, setSaveLoading);
+
+      // Also update our in-memory cache so switching back to this page
+      // within the same session uses the saved content as the baseline.
+      initialContentRef.current[pageId] = content;
     },
-    [storefrontId, pageId, router],
+    [pageId],
   );
 
   const handlePublish = useCallback(
     async (content: CraftJson) => {
-      // TEMPORARY: save to localStorage until backend is connected
+      // TEMPORARY: save to sessionStorage
+      // LATER: replace with handlePublishPage(...)
       savePageData(pageId, JSON.stringify(content));
-      // LATER: remove the line above and uncomment the block below
-      // const version = await handlePublishPage(content, storefrontId, pageId, router, setPageError, setPublishState);
-      // if (version) {
-      //   setPage((prev) =>
-      //     prev ? { ...prev, is_published: true, published_version: version } : prev,
-      //   );
-      // }
+      initialContentRef.current[pageId] = content;
     },
-    [storefrontId, pageId, router],
+    [pageId],
   );
-
-  if (pageLoading) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100vh",
-          background: "#0f0f11",
-          color: "#52525b",
-          fontSize: "0.875rem",
-          flexDirection: "column",
-          gap: "12px",
-        }}
-      >
-        <div
-          style={{
-            width: "28px",
-            height: "28px",
-            background: "#ff6a00",
-            borderRadius: "7px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: "14px",
-            fontWeight: 800,
-            color: "#fff",
-          }}
-        >
-          R
-        </div>
-        Loading editor…
-      </div>
-    );
-  }
-
-  // TEMPORARY: load from localStorage; LATER: remove loadPageData and use only page?.draft_content
-  const localContent = loadPageData(pageId);
-  const resolvedContent = localContent ? JSON.parse(localContent) : page?.draft_content;
 
   return (
     <EditorRenderer
       pageId={pageId}
-      content={resolvedContent}
+      // Pass the once-loaded initial content. EditorRenderer / Frame only uses
+      // this when the Frame mounts (i.e. when pageId changes). After that,
+      // Craft.js owns the canvas — no more storage reads on re-render.
+      content={getInitialContent(pageId)}
       theme={theme}
       onSave={handleSave}
       onPublish={handlePublish}

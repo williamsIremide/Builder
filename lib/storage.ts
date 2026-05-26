@@ -8,7 +8,7 @@ export function savePageData(pageId: PageId, serializedState: string): void {
   try {
     const existing = loadAllData();
     const updated: StorefrontData = { ...existing, [pageId]: serializedState };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
   } catch (e) {
     console.error('[RetailBox] Failed to save page data:', e);
   }
@@ -26,7 +26,7 @@ export function loadPageData(pageId: PageId): string | null {
 
 export function loadAllData(): StorefrontData {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     return JSON.parse(raw) as StorefrontData;
   } catch {
@@ -35,5 +35,5 @@ export function loadAllData(): StorefrontData {
 }
 
 export function clearAllData(): void {
-  localStorage.removeItem(STORAGE_KEY);
+  sessionStorage.removeItem(STORAGE_KEY);
 }
