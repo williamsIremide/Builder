@@ -1,3 +1,5 @@
+import { ProductCatalogBlock } from "~/components/blocks/ProductCatalogBlock ";
+
 export const PAGES = [
   { id: 'home',     label: 'Home',           icon: 'Home' },
   { id: 'products', label: 'Product List',   icon: 'LayoutGrid' },
@@ -21,11 +23,11 @@ export const PAGE_ALLOWED_BLOCKS: Record<PageId, string[]> = {
     'NewsletterSignup',
     'ContactForm',
   ],
-  products: ["AnnouncementBar", "ProductsHeroBlock", "ProductGrid", "AdBannerBlock"],
+  products: ["AnnouncementBar", "ProductsHeroBlock", 'ProductCatalogBlock', "ProductGrid", "AdBannerBlock"],
   product: ["AnnouncementBar", "ProductDetails"],
   cart: ["CartSummary"],
   checkout: ["CheckoutForm"],
-  locations: ["AnnouncementBar", "LocationBlock"],
+  locations: ["AnnouncementBar", "LocationBlock", "Contact Form"],
 };
 
 /** Human-readable labels for block names shown in the palette */
@@ -39,6 +41,9 @@ export const BLOCK_LABELS: Record<string, string> = {
   CartSummary:      'Cart Summary',
   CheckoutForm:     'Checkout Form',
   LocationBlock:    'Location Map',
+  ProductCatalogBlock: 'Product Catalog',
+  ProductsHeroBlock: 'Products Header',
+  AdBannerBlock: 'Ad Banner',
 };
 
 /** Optional: icons per block (lucide icon names) */

@@ -20,6 +20,7 @@ import {
   storefrontPageEndpoints,
 } from "~/constants/routes";
 import { request } from "~/utils/requestHandler/baseRequest";
+import { savePageData, loadPageData } from "~/lib/storage"; // ← ADD THIS IMPORT
 
 interface EditorPageProps {
   pageId: PageId;
@@ -78,36 +79,25 @@ export default function EditorPage({ pageId, storefrontId }: EditorPageProps) {
 
   const handleSave = useCallback(
     async (content: CraftJson) => {
-      await handleSaveDraft(
-        content,
-        storefrontId,
-        pageId,
-        router,
-        setPageError,
-        setSaveLoading,
-      );
+      // TEMPORARY: save to localStorage until backend is connected
+      savePageData(pageId, JSON.stringify(content));
+      // LATER: remove the line above and uncomment the line below
+      // await handleSaveDraft(content, storefrontId, pageId, router, setPageError, setSaveLoading);
     },
     [storefrontId, pageId, router],
   );
 
   const handlePublish = useCallback(
     async (content: CraftJson) => {
-      const version = await handlePublishPage(
-        content,
-        storefrontId,
-        pageId,
-        router,
-        setPageError,
-        setPublishState,
-      );
-
-      if (version) {
-        setPage((prev) =>
-          prev
-            ? { ...prev, is_published: true, published_version: version }
-            : prev,
-        );
-      }
+      // TEMPORARY: save to localStorage until backend is connected
+      savePageData(pageId, JSON.stringify(content));
+      // LATER: remove the line above and uncomment the block below
+      // const version = await handlePublishPage(content, storefrontId, pageId, router, setPageError, setPublishState);
+      // if (version) {
+      //   setPage((prev) =>
+      //     prev ? { ...prev, is_published: true, published_version: version } : prev,
+      //   );
+      // }
     },
     [storefrontId, pageId, router],
   );
@@ -148,10 +138,14 @@ export default function EditorPage({ pageId, storefrontId }: EditorPageProps) {
     );
   }
 
+  // TEMPORARY: load from localStorage; LATER: remove loadPageData and use only page?.draft_content
+  const localContent = loadPageData(pageId);
+  const resolvedContent = localContent ? JSON.parse(localContent) : page?.draft_content;
+
   return (
     <EditorRenderer
       pageId={pageId}
-      content={page?.draft_content}
+      content={resolvedContent}
       theme={theme}
       onSave={handleSave}
       onPublish={handlePublish}
