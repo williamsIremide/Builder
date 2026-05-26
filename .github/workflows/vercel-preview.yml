@@ -1,0 +1,21 @@
+name: Vercel Preview
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  preview:
+    uses: awesomegoodman/retailbox-ci-actions/.github/workflows/vercel-deploy-and-preview.yml@main
+    secrets:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+  use-preview-url:
+    needs: preview
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Preview URL is ${{ needs.preview.outputs.preview_url }}"

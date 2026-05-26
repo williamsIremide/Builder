@@ -1,0 +1,61 @@
+{
+  "name": "retailbox-shared-react",
+  "version": "0.1.0",
+  "private": true,
+  "exports": {
+    "./utils": "./utils/index.ts",
+    "./components": "./components/index.ts",
+    "./hooks": "./hooks/index.ts",
+    "./types": "./constants/types/index.ts"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint --fix",
+    "test": "jest --passWithNoTests",
+    "format:all": "prettier --write \"src/**/*.{js,jsx,ts,tsx,json,css,scss,md}\"",
+    "test:watch": "jest --watch",
+    "test:e2e": "playwright test"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,css,md}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "next": "14.2.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "peerDependencies": {
+    "@craftjs/core": "^0.2.11",
+    "clsx": "^2.1.1",
+    "firebase": "^12.12.1",
+    "localforage": "^1.10.0",
+    "lucide-react": "^0.383.0",
+    "sonner": "^2.0.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/google.maps": "^3.64.0",
+    "@types/lodash": "^4.17.24",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.5.0",
+    "jest": "^30.3.0",
+    "jest-environment-jsdom": "^30.3.0",
+    "postcss": "^8.5.14",
+    "tailwindcss": "^4.3.0",
+    "ts-jest": "^29.4.9",
+    "typescript": "^5"
+  }
+}
