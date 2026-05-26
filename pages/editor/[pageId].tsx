@@ -1,19 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useRef } from "react";
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
-import {
-  CraftJson,
-  StorefrontPage,
-  StorefrontPageId,
-  StorefrontTheme,
-} from "~/constants/types/models/storefront";
+import { CraftJson, StorefrontTheme } from "~/constants/types/models/storefront";
 import { DEFAULT_THEME } from "~/components/storefront/theme";
 import { PageId } from "~/lib/pagesConfig";
-import {
-  EditorRenderer,
-  handlePublishPage,
-  handleSaveDraft,
-} from "~/components";
+import { EditorRenderer } from "~/components";
 import { savePageData, loadPageData } from "~/lib/storage";
 
 interface EditorPageProps {
@@ -21,53 +12,42 @@ interface EditorPageProps {
   storefrontId: number;
 }
 
-interface PageData {
-  id: number;
-  page_id: StorefrontPageId;
-  draft_content: CraftJson;
-  is_published: boolean;
-  published_version: { version_no: number; created_at: string } | null;
-}
-
 export default function EditorPage({ pageId, storefrontId }: EditorPageProps) {
   const router = useRouter();
 
-  // Load each page's initial content ONCE from sessionStorage.
-  // After that, Craft.js owns the canvas state — we never re-read storage.
-  // useRef so it doesn't trigger re-renders and doesn't reset on page switch.
-  const initialContentRef = useRef<Partial<Record<PageId, CraftJson | null>>>({});
+  // Load each page's saved content from sessionStorage exactly once —
+  // the first time that page is requested. After that, usePageHistory's
+  // in-memory snapshot takes over (via the snapshot bridge in EditorRenderer).
+  // Using a ref so this cache survives re-renders without causing them.
+  const sessionCache = useRef<Partial<Record<PageId, CraftJson | null>>>({});
 
   const getInitialContent = (pid: PageId): CraftJson | null => {
-    if (!(pid in initialContentRef.current)) {
+    if (!(pid in sessionCache.current)) {
       const raw = loadPageData(pid);
-      initialContentRef.current[pid] = raw ? (JSON.parse(raw) as CraftJson) : null;
+      sessionCache.current[pid] = raw ? (JSON.parse(raw) as CraftJson) : null;
     }
-    return initialContentRef.current[pid] ?? null;
+    return sessionCache.current[pid] ?? null;
   };
 
-  const [theme] = useState<StorefrontTheme>(DEFAULT_THEME);
-  const [publishState, setPublishState] = useState<"idle" | "publishing" | "done">("idle");
-  const [page] = useState<PageData | null>(null);
-
+  // Save Draft — writes current canvas JSON to sessionStorage.
+  // sessionStorage is cleared on tab close / server restart (not persistent).
+  // LATER: replace body with handleSaveDraft(...) to hit the backend.
   const handleSave = useCallback(
     async (content: CraftJson) => {
-      // TEMPORARY: save to sessionStorage (clears on server restart / tab close)
-      // LATER: replace with handleSaveDraft(content, storefrontId, pageId, router, setPageError, setSaveLoading)
       savePageData(pageId, JSON.stringify(content));
-
-      // Also update our in-memory cache so switching back to this page
-      // within the same session uses the saved content as the baseline.
-      initialContentRef.current[pageId] = content;
+      // Also update the in-memory cache so if this component remounts it
+      // still has the right starting point.
+      sessionCache.current[pageId] = content;
     },
     [pageId],
   );
 
+  // Publish — same as save for now.
+  // LATER: replace with handlePublishPage(...) to create a StorefrontPageVersion.
   const handlePublish = useCallback(
     async (content: CraftJson) => {
-      // TEMPORARY: save to sessionStorage
-      // LATER: replace with handlePublishPage(...)
       savePageData(pageId, JSON.stringify(content));
-      initialContentRef.current[pageId] = content;
+      sessionCache.current[pageId] = content;
     },
     [pageId],
   );
@@ -75,17 +55,17 @@ export default function EditorPage({ pageId, storefrontId }: EditorPageProps) {
   return (
     <EditorRenderer
       pageId={pageId}
-      // Pass the once-loaded initial content. EditorRenderer / Frame only uses
-      // this when the Frame mounts (i.e. when pageId changes). After that,
-      // Craft.js owns the canvas — no more storage reads on re-render.
+      // Pass the once-read sessionStorage content as the initial baseline.
+      // EditorRenderer will prefer the live in-memory snapshot over this
+      // for pages that have already been visited in this session.
       content={getInitialContent(pageId)}
-      theme={theme}
+      theme={DEFAULT_THEME}
       onSave={handleSave}
       onPublish={handlePublish}
-      publishState={publishState}
-      isPublished={page?.is_published || false}
-      publishedVersion={page?.published_version ?? undefined}
-      onPageSwitch={(id: string) => router.push(`/editor/${id}`)}
+      publishState="idle"
+      isPublished={false}
+      publishedVersion={undefined}
+      onPageSwitch={(id) => router.push(`/editor/${id}`)}
     />
   );
 }

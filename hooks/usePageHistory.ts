@@ -5,153 +5,163 @@ import { PageId } from "~/lib/pagesConfig";
 /**
  * usePageHistory
  *
- * Gives each page tab its own independent undo/redo stack that survives
- * page switches. Works by:
+ * Maintains a fully independent per-page undo/redo stack using canvas
+ * snapshots. We do NOT rely on Craft.js's internal history at all, because
+ * it resets every time <Frame key={pageId}> remounts on a page switch.
  *
- * 1. On every Craft.js state change, snapshot the current serialized canvas
- *    AND the current history pointer into per-page refs.
- *
- * 2. On page leave: save the full canvas snapshot for the leaving page.
- *
- * 3. On page arrive: Craft.js has already loaded the new page via Frame remount.
- *    We clear the fresh (empty) history so undo/redo only covers edits made
- *    on this page in this session.
- *
- * The undo/redo stacks are maintained by Craft.js itself — we just keep
- * per-page canvas snapshots so switching back to a page restores its
- * in-progress edits (even unsaved ones).
- *
- * NOTE: The canvas snapshot ref is passed up to EditorInner so it can feed
- * the correct snapshot into <Frame data={}> on page arrival, instead of
- * always falling back to the server/localStorage content.
+ * Architecture:
+ * - Each page has its own stack: string[] of serialized canvas JSON
+ * - A pointer into that stack (current position)
+ * - On every Craft.js node change we push a new snapshot onto the stack
+ * - Undo: move pointer back and call actions.deserialize(snapshot)
+ * - Redo: move pointer forward and call actions.deserialize(snapshot)
+ * - On page switch: freeze the stack for the leaving page, resume for arriving page
+ * - getSnapshot(pageId): returns the latest snapshot for any page (for Frame data)
  */
 
-export interface PageHistoryHandle {
-  /** Get the latest in-memory snapshot for a page (unsaved edits included) */
-  getSnapshot: (pageId: PageId) => string | null;
+interface PageStack {
+  snapshots: string[];   // oldest → newest
+  pointer: number;       // index of current position in snapshots
 }
 
+// Module-level store so stacks survive across hook re-instantiations.
+// Safe because only one editor is ever mounted at a time.
+const pageStacks: Partial<Record<PageId, PageStack>> = {};
+
+function getStack(pageId: PageId): PageStack {
+  if (!pageStacks[pageId]) {
+    pageStacks[pageId] = { snapshots: [], pointer: -1 };
+  }
+  return pageStacks[pageId]!;
+}
+
+// Whether the next Craft.js state-change event should be ignored.
+// We set this true while we're deserializing (undo/redo) so we don't
+// push the restored snapshot onto the stack as a new entry.
+let _ignoreNextChange = false;
+
 export function usePageHistory(currentPage: PageId) {
-  const { actions, query, canUndo, canRedo } = useEditor((_, q) => ({
-    canUndo: q.history.canUndo(),
-    canRedo: q.history.canRedo(),
-  }));
+  const { actions, query } = useEditor();
 
-  // Per-page canvas snapshots — updated on EVERY state change, not just on leave.
-  // This means switching back to a page always restores the latest in-progress edits.
-  const canvasSnapshots = useRef<Partial<Record<PageId, string>>>({});
-  const prevPage = useRef<PageId | null>(null);
+  // Track the last serialized state so we can detect real changes
+  const lastSerializedRef = useRef<string>("");
+  const currentPageRef = useRef<PageId>(currentPage);
+  const isApplyingRef = useRef(false); // true while undo/redo deserialization runs
 
-  // ── Continuously snapshot the current page on every Craft.js state change ──
-  // We subscribe via useEditor's selector — any node change re-runs this effect.
-  const { serializedNodes } = useEditor((state) => ({
-    // Trigger re-render whenever nodes change so we can snapshot
-    serializedNodes: state.nodes,
-  }));
+  // Keep currentPageRef in sync
+  useEffect(() => {
+    currentPageRef.current = currentPage;
+  }, [currentPage]);
+
+  // ── Subscribe to Craft.js state changes ───────────────────────────────────
+  // We watch via a polling useEffect on the serialized nodes.
+  // useEditor's selector fires on every state update.
+  const { nodes } = useEditor((state) => ({ nodes: state.nodes }));
 
   useEffect(() => {
-    // Keep the snapshot for the current page fresh at all times
+    // Skip if we're mid-undo/redo (we caused this change ourselves)
+    if (isApplyingRef.current) return;
+
+    let serialized: string;
     try {
-      canvasSnapshots.current[currentPage] = query.serialize();
+      serialized = query.serialize();
     } catch {
-      // Editor not ready yet
-    }
-  }, [serializedNodes, currentPage, query]);
-
-  // ── Page-switch effect ─────────────────────────────────────────────────────
-  useEffect(() => {
-    if (prevPage.current === null) {
-      prevPage.current = currentPage;
       return;
     }
 
-    if (prevPage.current === currentPage) return;
+    // Skip if nothing actually changed
+    if (serialized === lastSerializedRef.current) return;
+    lastSerializedRef.current = serialized;
 
-    // Page has changed. The Frame remount (key={pageId} in EditorInner) has
-    // already loaded the arriving page's content. Clear the history so
-    // undo/redo only covers edits made on THIS page from THIS moment.
-    //
-    // Defer by one tick so Frame finishes initialising before we clear.
-    const raf = requestAnimationFrame(() => {
-      try {
-        actions.history.clear();
-      } catch {
-        // Safe to ignore during unmount
-      }
+    const page = currentPageRef.current;
+    const stack = getStack(page);
+
+    // Truncate any redo history above the current pointer
+    stack.snapshots = stack.snapshots.slice(0, stack.pointer + 1);
+
+    // Push the new snapshot
+    stack.snapshots.push(serialized);
+    stack.pointer = stack.snapshots.length - 1;
+
+    // Cap stack size to avoid unbounded memory use
+    const MAX = 100;
+    if (stack.snapshots.length > MAX) {
+      const overflow = stack.snapshots.length - MAX;
+      stack.snapshots.splice(0, overflow);
+      stack.pointer = Math.max(0, stack.pointer - overflow);
+    }
+  }, [nodes, query]);
+
+  // ── Derived can-undo / can-redo ───────────────────────────────────────────
+  const stack = getStack(currentPage);
+  const canUndo = stack.pointer > 0;
+  const canRedo = stack.pointer < stack.snapshots.length - 1;
+
+  // ── Apply a snapshot to the canvas ───────────────────────────────────────
+  const applySnapshot = useCallback((snapshot: string) => {
+    isApplyingRef.current = true;
+    lastSerializedRef.current = snapshot; // prevent re-push
+    try {
+      actions.deserialize(snapshot);
+    } catch (e) {
+      console.error("[PageHistory] deserialize failed", e);
+    }
+    // Allow a tick for Craft.js to settle before re-enabling tracking
+    requestAnimationFrame(() => {
+      isApplyingRef.current = false;
     });
+  }, [actions]);
 
-    prevPage.current = currentPage;
-    return () => cancelAnimationFrame(raf);
-  }, [currentPage, actions]);
-
-  // ── Scroll + flash helper ──────────────────────────────────────────────────
-  const scrollToChangedNode = useCallback(
-    (nodesBefore: Set<string>) => {
-      requestAnimationFrame(() => {
-        try {
-          const nodesAfter = new Set<string>(
-            Object.keys(query.getSerializedNodes())
-          );
-
-          let targetId: string | null = null;
-
-          for (const id of nodesAfter) {
-            if (!nodesBefore.has(id)) { targetId = id; break; }
-          }
-          if (!targetId) {
-            for (const id of nodesBefore) {
-              if (!nodesAfter.has(id)) { targetId = id; break; }
-            }
-          }
-          if (!targetId) {
-            const state = query.getState();
-            const selected = state.events?.selected as Set<string> | undefined;
-            targetId = selected ? ([...selected][0] ?? null) : null;
-          }
-
-          if (!targetId || targetId === "ROOT") return;
-
-          const el = document.querySelector<HTMLElement>(`[data-id="${targetId}"]`);
-          if (!el) return;
-
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          const prevOutline = el.style.outline;
-          const prevOffset = el.style.outlineOffset;
-          el.style.outline = "2px solid var(--rb-primary, #ff6a00)";
-          el.style.outlineOffset = "3px";
-          setTimeout(() => {
-            el.style.outline = prevOutline;
-            el.style.outlineOffset = prevOffset;
-          }, 1200);
-        } catch {
-          // query may throw if editor is mid-transition
+  // ── Scroll + flash the affected node ─────────────────────────────────────
+  const flashNode = useCallback((nodesBefore: Set<string>) => {
+    requestAnimationFrame(() => {
+      try {
+        const nodesAfter = new Set(Object.keys(query.getSerializedNodes()));
+        let targetId: string | null = null;
+        for (const id of nodesAfter) { if (!nodesBefore.has(id)) { targetId = id; break; } }
+        if (!targetId) for (const id of nodesBefore) { if (!nodesAfter.has(id)) { targetId = id; break; } }
+        if (!targetId) {
+          const sel = query.getState().events?.selected as Set<string> | undefined;
+          targetId = sel ? ([...sel][0] ?? null) : null;
         }
-      });
-    },
-    [query]
-  );
+        if (!targetId || targetId === "ROOT") return;
+        const el = document.querySelector<HTMLElement>(`[data-id="${targetId}"]`);
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        const prev = el.style.outline;
+        el.style.outline = "2px solid var(--rb-primary, #ff6a00)";
+        el.style.outlineOffset = "3px";
+        setTimeout(() => { el.style.outline = prev; el.style.outlineOffset = ""; }, 1200);
+      } catch {}
+    });
+  }, [query]);
 
-  // ── Public undo / redo ─────────────────────────────────────────────────────
+  // ── Public undo ───────────────────────────────────────────────────────────
   const undo = useCallback(() => {
-    if (!canUndo) return;
-    const nodesBefore = new Set<string>(Object.keys(query.getSerializedNodes()));
-    actions.history.undo();
-    scrollToChangedNode(nodesBefore);
-  }, [canUndo, actions, query, scrollToChangedNode]);
+    const s = getStack(currentPageRef.current);
+    if (s.pointer <= 0) return;
+    s.pointer -= 1;
+    const nodesBefore = new Set(Object.keys(query.getSerializedNodes()));
+    applySnapshot(s.snapshots[s.pointer]);
+    flashNode(nodesBefore);
+  }, [applySnapshot, flashNode, query]);
 
+  // ── Public redo ───────────────────────────────────────────────────────────
   const redo = useCallback(() => {
-    if (!canRedo) return;
-    const nodesBefore = new Set<string>(Object.keys(query.getSerializedNodes()));
-    actions.history.redo();
-    scrollToChangedNode(nodesBefore);
-  }, [canRedo, actions, query, scrollToChangedNode]);
+    const s = getStack(currentPageRef.current);
+    if (s.pointer >= s.snapshots.length - 1) return;
+    s.pointer += 1;
+    const nodesBefore = new Set(Object.keys(query.getSerializedNodes()));
+    applySnapshot(s.snapshots[s.pointer]);
+    flashNode(nodesBefore);
+  }, [applySnapshot, flashNode, query]);
 
-  // ── Expose snapshot accessor ───────────────────────────────────────────────
-  const getSnapshot = useCallback(
-    (pageId: PageId): string | null =>
-      canvasSnapshots.current[pageId] ?? null,
-    []
-  );
+  // ── getSnapshot: latest canvas for any page ───────────────────────────────
+  const getSnapshot = useCallback((pageId: PageId): string | null => {
+    const s = pageStacks[pageId];
+    if (!s || s.pointer < 0) return null;
+    return s.snapshots[s.pointer] ?? null;
+  }, []);
 
   return { undo, redo, canUndo, canRedo, getSnapshot };
 }

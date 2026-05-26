@@ -1,6 +1,3 @@
-/**
- * components/editor/EditorRenderer.tsx
- */
 import React, { useCallback, useRef, useState } from "react";
 import { Editor, Frame, Element, useEditor } from "@craftjs/core";
 import { craftResolver } from "~/components/editor/resolver";
@@ -69,7 +66,7 @@ export const handlePublishPage = async (
     );
     const version = await createSingleInstance<StorefrontPageVersion>(
       `/api/storefront/${storefrontId}/pages/${pageId}/publish/`,
-      //@ts-ignore
+      // @ts-ignore
       {},
       setError,
       router,
@@ -92,10 +89,6 @@ export const handlePublishPage = async (
 
 export interface EditorRendererProps {
   pageId: PageId;
-  /**
-   * Initial content for this page (from sessionStorage or server).
-   * Only used when the page first mounts — after that Craft.js owns the state.
-   */
   content?: CraftJson | string | null;
   theme?: StorefrontTheme | null;
   onSave: (content: CraftJson) => Promise<void>;
@@ -106,17 +99,20 @@ export interface EditorRendererProps {
   onPageSwitch: (pageId: PageId) => void;
 }
 
+// ─── Module-level snapshot bridge ────────────────────────────────────────────
+// EditorInner (inside <Editor>) owns usePageHistory and its getSnapshot fn.
+// EditorRenderer (outside <Editor>) needs getSnapshot to compute baselineContent
+// before passing it into EditorInner. We bridge this with a module-level ref —
+// safe because only one EditorInner is ever alive at a time.
+type GetSnapshotFn = (pageId: PageId) => string | null;
+let _getSnapshot: GetSnapshotFn | null = null;
+
 // ─── EditorInner ─────────────────────────────────────────────────────────────
-// Must live inside <Editor> to call useEditor() and usePageHistory().
 
 interface EditorInnerProps extends EditorRendererProps {
   themeVars: React.CSSProperties;
-  /**
-   * The baseline serialized content for this page — used as the Frame's
-   * initial `data`. May be the server content OR an in-memory snapshot from
-   * a previous visit to this page in the same session.
-   */
   baselineContent: string | undefined;
+  onBaselineReady: () => void; // tells EditorRenderer the bridge is live
 }
 
 const EditorInner = ({
@@ -133,18 +129,19 @@ const EditorInner = ({
   const { query } = useEditor();
   const [previewMode, setPreviewMode] = useState(false);
 
-  // usePageHistory lives here (inside Editor) so it can call useEditor().
-  // getSnapshot lets EditorRenderer retrieve the live in-memory canvas for
-  // any page — used when the user switches pages so we pass the snapshot
-  // (not the stale server content) as the new page's baseline.
   const { undo, redo, canUndo, canRedo, getSnapshot } = usePageHistory(pageId);
 
-  // Expose getSnapshot upward via a ref on the window (simple cross-component
-  // communication without prop-drilling through the Editor boundary).
-  // EditorRenderer reads this ref when computing the next page's baselineContent.
-  useSnapshotBridge(getSnapshot);
+  // Keep bridge live whenever getSnapshot changes identity
+  React.useEffect(() => {
+    _getSnapshot = getSnapshot;
+    return () => { _getSnapshot = null; };
+  }, [getSnapshot]);
 
-  const getContent = useCallback(() => JSON.parse(query.serialize()), [query]);
+  const getContent = useCallback(
+    () => JSON.parse(query.serialize()) as CraftJson,
+    [query],
+  );
+
   const pageLabel = PAGES.find((p) => p.id === pageId)?.label ?? pageId;
 
   return (
@@ -159,7 +156,6 @@ const EditorInner = ({
         isPublished={isPublished}
         publishState={publishState}
         publishedVersion={publishedVersion}
-        // Pass undo/redo down to Toolbar so it can wire the buttons
         onUndo={undo}
         onRedo={redo}
         canUndo={canUndo}
@@ -182,15 +178,20 @@ const EditorInner = ({
               </span>
               <div style={{ flex: 1, height: "1px", background: "#27272a" }} />
               {isPublished && publishedVersion ? (
-                <span style={{ fontSize: "0.68rem", color: "#16a34a", fontWeight: 700 }}>● v{publishedVersion.version_no} live</span>
+                <span style={{ fontSize: "0.68rem", color: "#16a34a", fontWeight: 700 }}>
+                  ● v{publishedVersion.version_no} live
+                </span>
               ) : (
-                <span style={{ fontSize: "0.68rem", color: "#71717a", fontWeight: 600 }}>○ Unpublished</span>
+                <span style={{ fontSize: "0.68rem", color: "#71717a", fontWeight: 600 }}>
+                  ○ Unpublished
+                </span>
               )}
             </div>
           )}
 
           <div style={{
-            width: "100%", maxWidth: previewMode ? "100%" : "900px",
+            width: "100%",
+            maxWidth: previewMode ? "100%" : "900px",
             background: "#fff",
             minHeight: previewMode ? "100vh" : "600px",
             borderRadius: previewMode ? "0" : "10px",
@@ -201,10 +202,12 @@ const EditorInner = ({
             boxSizing: "border-box",
           }}>
             {/*
-              key={pageId} forces Frame to unmount/remount on page switch.
-              baselineContent is the snapshot for this page if we've visited it
-              before in this session, otherwise it's the server/default content.
-              After mount, Craft.js owns the canvas — we don't touch `data` again.
+              key={pageId} forces Frame to remount on every page switch.
+              baselineContent is:
+                - The latest in-memory snapshot for this page (if we've been here before), OR
+                - The initial content from sessionStorage / default
+              After Frame mounts, Craft.js owns the canvas. We never touch data again
+              until the next page switch.
             */}
             <Frame key={pageId} data={baselineContent}>
               <Element is={RootContainer} canvas id="root" />
@@ -224,75 +227,62 @@ const EditorInner = ({
   );
 };
 
-// ─── Snapshot bridge ──────────────────────────────────────────────────────────
-// usePageHistory lives inside <Editor> but EditorRenderer (outside <Editor>)
-// needs to read snapshots when computing baselineContent for the next page.
-// We stash the getter in a module-level ref — safe because there's only ever
-// one EditorInner alive at a time.
-
-type SnapshotGetter = (pageId: PageId) => string | null;
-let _snapshotGetter: SnapshotGetter | null = null;
-
-function useSnapshotBridge(getter: SnapshotGetter) {
-  _snapshotGetter = getter;
-  // Clear on unmount
-  React.useEffect(() => {
-    _snapshotGetter = getter;
-    return () => { _snapshotGetter = null; };
-  }, [getter]);
-}
-
-function getSnapshotForPage(pageId: PageId): string | null {
-  return _snapshotGetter ? _snapshotGetter(pageId) : null;
-}
-
 // ─── EditorRenderer ───────────────────────────────────────────────────────────
+
+/**
+ * Resolves what content to feed into <Frame data={}> for a given page.
+ *
+ * Priority:
+ *   1. Live in-memory snapshot from usePageHistory (has all unsaved edits)
+ *   2. sessionStorage content passed in via props (from a previous save)
+ *   3. Hardcoded default page layout
+ */
+function resolveBaselineContent(
+  pageId: PageId,
+  serverContent: CraftJson | string | null | undefined,
+): string {
+  // 1. In-memory snapshot — present if we've visited this page before
+  const snapshot = _getSnapshot ? _getSnapshot(pageId) : null;
+  if (snapshot) return snapshot;
+
+  // 2. Content from sessionStorage (passed via props from [pageId].tsx)
+  if (serverContent) {
+    if (typeof serverContent === "object" && Object.keys(serverContent).length > 0) {
+      return JSON.stringify(serverContent);
+    }
+    if (typeof serverContent === "string" && serverContent !== "{}") {
+      return serverContent;
+    }
+  }
+
+  // 3. Hardcoded default
+  const fallback = DEFAULT_PAGE_CONTENT[pageId];
+  if (fallback && Object.keys(fallback).length > 0) {
+    return JSON.stringify(fallback);
+  }
+
+  // 4. Bare ROOT (prevents crash on unknown page)
+  return JSON.stringify({
+    ROOT: {
+      type: { resolvedName: "RootContainer" },
+      isCanvas: true,
+      props: { id: "root" },
+      displayName: "RootContainer",
+      custom: {},
+      hidden: false,
+      nodes: [],
+      linkedNodes: {},
+    },
+  });
+}
 
 export const EditorRenderer = (props: EditorRendererProps) => {
   const themeVars = themeToVars(props.theme ?? DEFAULT_THEME);
 
-  // Track which pages we've already loaded so we use the in-memory snapshot
-  // on subsequent visits instead of re-loading the original content.
-  const visitedPages = useRef<Set<PageId>>(new Set());
-
-  const computeBaselineContent = (pageId: PageId, serverContent: CraftJson | string | null | undefined): string | undefined => {
-    // If we've visited this page before in this session, use the live in-memory
-    // snapshot (which includes all unsaved edits) as the Frame's starting point.
-    if (visitedPages.current.has(pageId)) {
-      const snapshot = getSnapshotForPage(pageId);
-      if (snapshot) return snapshot;
-    }
-
-    // First visit — mark as visited and use server/sessionStorage/default content.
-    visitedPages.current.add(pageId);
-
-    if (serverContent && typeof serverContent === "object" && Object.keys(serverContent).length > 0) {
-      return JSON.stringify(serverContent);
-    }
-    if (serverContent && typeof serverContent === "string" && serverContent !== "{}") {
-      return serverContent;
-    }
-
-    const fallback = DEFAULT_PAGE_CONTENT[pageId];
-    if (fallback && Object.keys(fallback).length > 0) {
-      return JSON.stringify(fallback);
-    }
-
-    return JSON.stringify({
-      ROOT: {
-        type: { resolvedName: "RootContainer" },
-        isCanvas: true,
-        props: { id: "root" },
-        displayName: "RootContainer",
-        custom: {},
-        hidden: false,
-        nodes: [],
-        linkedNodes: {},
-      },
-    });
-  };
-
-  const baselineContent = computeBaselineContent(props.pageId, props.content);
+  // We need to recompute baselineContent each time pageId changes.
+  // Using a render-time call is fine here — resolveBaselineContent is cheap
+  // and _getSnapshot is always up-to-date from the previous EditorInner render.
+  const baselineContent = resolveBaselineContent(props.pageId, props.content);
 
   return (
     <Editor resolver={craftResolver} enabled={true}>
@@ -300,6 +290,7 @@ export const EditorRenderer = (props: EditorRendererProps) => {
         {...props}
         themeVars={themeVars}
         baselineContent={baselineContent}
+        onBaselineReady={() => {}}
       />
     </Editor>
   );
